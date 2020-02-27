@@ -1,0 +1,529 @@
+---
+title: "Robust inference when combining inverse probability weighting with multiple imputation"
+author: "Tanayott Thaweethai"
+date: "02/27/20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This tutorial implements the robust variance estimator described in Section 3.4 of the manuscript "Robust inference when combining inverse-probability weighting and multiple imputation to address missing data with application to an electronic health records-based study of bariatric surgery" (T. Thaweethai, D.E. Arterburn, K.J. Coleman, and S. Haneuse, 2020).
+
+### Example dataset
+
+To illustrate, we generate the following dataset to match the simulation study described in the manuscript, which differs from Seaman et al. (2012) in that the errors for the outcome variable $Y$ (referred to here as $Y_1$) are generated with heteroskedastic errors.
+
+```{r eval=TRUE}
+N <- 10^3
+set.seed(1000)
+d <- data.frame(matrix(nrow=N,ncol=0))
+d$i <- 1:N
+d$X1 <- rbinom(N,1,0.5)
+d$X2 <- rnorm(N)
+d$X3 <- rnorm(N)
+d$X4 <- rnorm(N)
+d$X5 <- rnorm(N,d$X2*d$X3)
+d$Y1 <- rnorm(N,-3 + d$X1*d$X2 + d$X1*d$X3 + 0.5*d$X2*d$X3 + d$X4 + 0.5*d$X5,ifelse(d$X1==1,2,1))
+```
+
+### Missing data
+
+* $X_1$ is observed for all individuals
+* ($X_2,X_3,X_4,X_5$) is observed with probability $0.8-0.6X_1$, indicated by the variable <tt>R1</tt>
+* Given that R1=1, $Y_1$ is observed with probability $[1+\exp(-1.5+0.6X_2X_4)]^{-1}$, indicated by the variable <tt>R2</tt>
+
+```{r eval=TRUE}
+d$R1 <- rbinom(N,1,0.8-0.6*d$X1)
+d$R2 <- ifelse(d$R1==1,rbinom(N,1,1/(1+exp(-1.5+0.6*d$X2*d$X4))),rep(0,N))
+d.obs <- d
+d.obs$X2 <- ifelse(d$R1, d$X2, NA)
+d.obs$X3 <- ifelse(d$R1, d$X3, NA)
+d.obs$X4 <- ifelse(d$R1, d$X4, NA)
+d.obs$X5 <- ifelse(d$R1, d$X5, NA)
+d.obs$Y1 <- ifelse(d$R2, d$Y1, NA)
+```
+
+### Analysis model
+
+The analysis model of interest is 
+
+\begin{equation}
+Y_1=\theta_0+\theta_2X_2+\theta_3X_3+\theta_{23}X_2X_3+e\text{, where }E(e|X_2,X_3)=0
+\end{equation}
+
+As in Seaman et al. (2012), upon integrating over the distribution of $X_1,X_4,$ and $X_5$ and under homosekdastic errors, it can be shown that the analysis model is correctly specified and the true value of the parameters induced by this model is $(\theta_0, \theta_2, \theta_3, \theta_{23})=(-3, 0.5, 0.5, 1)$. In the heteroskedastic errors setting, however, the analysis model is misspecified.
+
+Under this analysis model, we define $D$, the set of variables needed to fit the analysis model, as $(X_2,X_3,Y_1)$. 
+
+We define $X=[1,X_2,X_3,X_2\times X_3]^\top$ as the functional form of the predictors in the analysis model and $Y=Y_1$ as the outcome for the analysis model. The score equation for estimating $\theta$ in the analysis model in the presence of complete data is given by
+
+\begin{equation}
+\sum_{i=1}^N S_{\theta,i}=X_i(Y_i-\theta^\top X_i)=0
+\end{equation}
+
+## Combining IPW and MI to handle missing data
+
+### Inverse-probability weighting
+We identify the subset of patients for whom missing values will be imputed via identification of a rule. We define $\mathcal{R}=1$ if ($X_2,X_3$) observed, which is already coded in the data as <tt>R1</tt> (since $X_2,X_3,X_4,X_5$ are jointly observed). 
+
+We will use a linear regression with predictor $X_1$ as the IPW model for predicting whether an individual has a missingness pattern that corresponds to $\mathcal{R}=1$ (i.e., <tt>R1</tt>=1). The IPW model is given by
+
+\begin{equation}
+\text{pr}(\mathcal{R}=1) = \alpha_0 + \alpha_1 X_1
+\end{equation}
+
+where $\alpha=[\alpha_0,\alpha_1]^\top$, and we define $H=[1,X_1]^\top$.  
+
+The score equation for estimating $\alpha$ in the IPW model is given by
+
+\begin{equation}
+\sum_{i=1}^N S_{\alpha,i}=\sum_{i=1}^N H_i(\mathcal{R}_i-\alpha^\top H_i)=0
+\end{equation}
+
+After obtaining $\hat{\alpha}$, the formula for the probability an individual meets the "Rule" is given by
+
+\begin{equation}
+\pi_i(\hat{\alpha})=\hat{\alpha}^\top H_i
+\end{equation}
+
+and so the inverse-probability weight for an individual is given by
+
+\begin{equation}
+W_i(\hat{\alpha})=\frac{\mathcal{R}_i}{\pi_i(\hat{\alpha})}
+\end{equation}
+
+### Multiple imputation 
+Among individuals with $\mathcal{R}=1$, the only remaining variable in $D$ with missingness is $Y_1$. Therefore, we partition $D$ into $D_{\mathcal{R}}^m=Y_1$ and $D_{\mathcal{R}}^o=(X_2,X_3)$.
+
+Knowing the data generating mechanism, we will use auxiliary variables $X_1$, $X_4$, and $X_5$ for imputation. These variables are fully observed for individuals with $\mathcal{R}=1$ and so we define $D^\dagger=(X_1,X_4,X_5)$. We use $Z$ to represent the functional form of $(D_{\mathcal{R}}^o,D^\dagger)$ as predictors in our imputation model: $Z$ = ($1$, $X_1$, $X_2$, $X_3$,  $X_4$, $X_5$, $X_1X_2$, $X_1X_3$, $X_2X_3$, $X_1X_2X_3)^\top$.
+
+We define $R_{D,i}$ to be an indicator of whether the $i\text{th}$ individual has $Y_1$ observed in addition to $X_1-X_5$. Therefore, if $R_{D,i}=1$, then it is necessarily true that $\mathcal{R}_i=1$. We fit the following imputation model among individuals with $R_{D,i}=1$, indexed by parameter $\psi$, which we partition into $\psi=(\beta^\top,\sigma)^\top$:
+\begin{equation*}
+Y_{1,i}=\beta^\top Z_i+\epsilon_i\text{, where }\epsilon_i\sim N(0,\sigma)
+\end{equation*}
+The contribution of individual $i$ to the estimating equation for the imputation model is
+\begin{equation*}
+S_{\psi}^{obs}(\psi;Y_{1,i},Z_i)=S_{\psi,i}^{obs}(\psi)=\begin{bmatrix}
+S_{\beta}^{obs}(\psi;Y_{1,i},Z_i)\\S_{\sigma}^{obs}(\psi;Y_{1,i},Z_i)
+\end{bmatrix}=\begin{bmatrix}
+R_{D,i}\sigma^{-2}Z_i(Y_{1,i}-\beta^\top Z_i)\\
+R_{D,i}\{-\sigma^{-1}+\sigma^{-3}(Y_{1,i}-\beta^\top Z_i)^2\}
+\end{bmatrix}
+\end{equation*}
+We solve the estimating equations $\sum_{i=1}^NS_{\psi,i}^{obs}(\psi)=0$ to obtain $\hat{\psi}=(\hat{\beta}^\top,\hat{\sigma})^\top$. For each of $M$ impuations, following the improper imputation, we impute $Y_{1,i}^{(j)}$ for individuals with $\mathcal{R}_i=1$ but $R_{D,i}=0$ as follows:
+\begin{equation*}
+Y_{1,i}^{(j)}=\hat{\beta}^\top Z_i+\tilde{\epsilon}_i^{(j)}
+\end{equation*}
+where $\tilde{\epsilon}_i^{(j)}$ is a single draw from a normal distribution with mean 0 and standard deviation $\hat{\sigma}$. For individuals with $\mathcal{R}_i=R_{D,i}=1$, $Y_{1,i}^{(j)}=Y_{1,i}$ (i.e., their observed value). 
+
+### Fitting the analysis model 
+Finally, the contribution of individual $i$ in the $j\text{th}$ imputed dataset to the weighted estimating equations is $W_i(\hat{\alpha})S_{\theta,i}^{(j)}$, where $S_{\theta,i}^{(j)}$ is the score of the analysis model for the $i^{th}$ individual in the $j^{th}$ imputed dataset.
+
+We solve the estimating equations 
+
+\begin{equation}
+\sum_{i=1}^N\sum_{j=1}^M W_i(\hat{\alpha})S_{\theta,i}^{(j)}=0
+\end{equation}
+
+to obtain $\hat{\theta}$.
+
+## Using the function
+
+We specify the following:
+
+Parameter | Definition
+--------- | ----------
+<tt>dset</tt> | the name of the dataset with missingness, where missing values are NA
+<tt>M</tt> | the number of imputations to perform 
+<tt>analysis.model.formula</tt> | a formula object for the analysis model (must have a univariate outcome in current implementation).
+<tt>ipw.model.formula</tt> | a formula object for the IPW model, where the outcome variable is the indciator variable for the user-specified "rule", and the predictors are the functional form of $H$. You may need to create a variable on your own that is an indicator for the rule.
+<tt>imp.model.formula</tt> | a formula object for the imputation model, where the outcome variable is $D_{\mathcal{R}}^m$ and the predictor variables are the functional form for ($D_{\mathcal{R}}^o,D^\dagger$).
+<tt>S.theta.i</tt> | a function for the score for the analysis model, where we write <tt>Di\$X</tt> to represent the vector of predictors and <tt>Di\$Y</tt> to represent the single outcome variable from <tt>ipw.model.formula</tt>.
+<tt>S.alpha.i</tt> | a function for the score of the IPW model, where we write <tt>Di\$H</tt> to represent the vector of predictors and <tt>Di\$Rule</tt> to represent the outcome of the IPW model.
+<tt>pi.i</tt> | a function for the probability that $\mathcal{R}=1$, where we write <tt>Di\$H</tt> to represent the vector of predictors in the IPW model.
+<tt>imp.method</tt> | "linear" or "logistic" only. Currently working on implementation for multivariate normal imputation.
+
+
+```{r echo=FALSE, eval=TRUE, message=FALSE}
+library(numDeriv)
+library(rootSolve)
+
+  get.ipwmi.se <- function(dset,
+                         M,
+                         analysis.model.formula,
+                         ipw.model.formula,
+                         imp.model.formula,
+                         S.theta.i,
+                         S.alpha.i,
+                         imp.method,
+                         pi.i){
+    
+    # Split data into 
+    # Rule (User-specified rule; indicator of inclusion. IPW model outcome variable)
+    # H (IPW model predictors)
+    # Dm  (Variable to be imputed)
+    # Dod (Imputation model predictors: D_i^o and D_i^\dagger)
+    # Complete (Indicator of D being completely observed)
+    # Y (Analysis model outcome)
+    # X (Analysis model predictors)
+    
+    N <- nrow(dset)
+    Dm.var <- all.vars(imp.model.formula)[1] 
+    Rule.var <- all.vars(ipw.model.formula)[1]
+
+    # Store data in matrices 
+    Rule.N <- matrix(dset[,Rule.var],ncol=1)
+    H.N <- model.matrix.lm(ipw.model.formula,data=dset, na.action='na.pass')
+    Dm.N <- matrix(dset[,Dm.var], ncol=1)
+    Dod.N <- model.matrix.lm(imp.model.formula,data=dset, na.action='na.pass')  
+    Complete.N <- matrix(!is.na(Dm.N), ncol=1)
+    Y.N <- matrix(model.response(model.frame(analysis.model.formula,data=dset,na.action=NULL)), ncol=1)
+    X.N <- model.matrix.lm(analysis.model.formula, data=dset, na.action='na.pass')
+    
+    if (sum(is.na(H.N)) > 0) {stop("IPW model predictors are not fully observed")}
+    if (sum(is.na(Dod.N[which(Rule.N==1),])) > 0) {stop("Imputation model predictors are not fully observed among individuals with Rule=1")}
+    if (sum(is.na(Y.N[which(Complete.N==1),])) > 0) {stop("Analysis model outcome is not fully observed among individuals among whom the imputation model is fit, 
+                                                    and it should be, because those people should have complete data")}
+    if (sum(is.na(X.N[which(Complete.N==1),])) > 0) {stop("Analysis model predictors are not fully observed among individuals among whom the imputation model is fit, 
+                                                    and it should be, because those people should have complete data")}
+    
+    # Extract the data for the ith individual 
+    get.Di <- function(i){
+      list(X = matrix(X.N[i, ], ncol = 1),
+           Y = Y.N[i],
+           H = matrix(H.N[i, ], ncol = 1),
+           Dod = matrix(Dod.N[i, ], ncol = 1),
+           Rule = Rule.N[i],
+           Complete = Complete.N[i],
+           Dm = Dm.N[i])
+    }
+    
+    ### FIRST ANALYTICAL APPROACH: Complete case analysis
+    
+    # Solve for theta, which indexes the analysis model
+    S.theta.cc.i <- function(Di, theta.hat){
+      if (Di$Complete == 1){
+        return(S.theta.i(Di, theta.hat))
+      } else {
+        return(matrix(data = 0, nrow = nrow(Di$X), ncol = 1))
+      }
+    }
+    
+    n <- sum(Complete.N) # number of complete cases
+    
+    S.theta.cc.multiroot <- function(theta.hat){
+      rowMeans(do.call("cbind",lapply(1:N,function(i){
+          Di <- get.Di(i)
+          return(S.theta.cc.i(Di, theta.hat))
+      })))
+    }
+    
+    theta.cc.hat <- matrix(data = multiroot(S.theta.cc.multiroot,rep(0,nrow(get.Di(1)$X)))$root, ncol=1)
+    
+    S.theta.cc <-do.call("cbind",lapply(1:N,function(i){
+        S.theta.cc.i(get.Di(i), theta.cc.hat)
+      }))
+    
+    # Use a sandwich estimator to estimate standard errors
+    
+    tau.cc.hat <- 1/n * Reduce("+",lapply(1:N,function(i){
+        S.theta.cc <- function(theta.cc.hat){S.theta.cc.i(get.Di(i),theta.cc.hat)}
+        return(-jacobian(S.theta.cc,theta.cc.hat))
+    }))
+    
+    se.cc <-sqrt(diag(1/n * solve(tau.cc.hat) %*% S.theta.cc %*% (t(S.theta.cc)/n) %*% t(solve(tau.cc.hat))))
+    
+    ### SECOND ANALYTICAL APPROACH: IPW/MI
+    
+    # Estimate alpha hat (IPW model)
+    S.alpha.multiroot <- function(alpha.hat){
+      rowMeans(do.call("cbind",lapply(1:N,function(i){
+        Di <- get.Di(i)
+        return(S.alpha.i(Di, alpha.hat))
+      })))
+    }
+    
+    alpha.hat <- matrix(data = multiroot(S.alpha.multiroot,rep(0,nrow(get.Di(1)$H)))$root, ncol=1)
+    
+    # Partition indiviuals who meet the initial inclusion rule into those whose Dm will be imputed and those who will not
+    d.to.impute <- dset[which(Rule.N==1 & Complete.N==0),]
+    d.not.imputed <- dset[which(!(Rule.N==1 & Complete.N==0)),]
+    
+    if (imp.method == "linear"){
+      # Linear imputation model
+      
+      # Estimating equation for beta and sigma (collectively psi) which index the imputation model
+      S.psi.i <- function(Di, psi.hat){
+        beta.hat <- psi.hat[1:(length(psi.hat)-1)]
+        sigma.hat <- psi.hat[length(psi.hat)]
+        return(rbind(1/sigma.hat^2 * Di$Dod %*% (Di$Dm - t(beta.hat) %*% Di$Dod),
+                     -1/sigma.hat+((Di$Dm - t(beta.hat) %*% Di$Dod)^2/sigma.hat^3)))
+      }
+      
+      # Solve for psi hat (beta hat and sigma hat)
+      imp.fit <- glm(imp.model.formula, data = dset[which(Rule.N==1),])
+      beta.hat <- matrix(coef(imp.fit), ncol = 1)
+      sigma.hat <- sigma(imp.fit)
+      psi.hat <- matrix(c(beta.hat, sigma.hat), ncol=1)
+      
+      # Generate imputations
+      imputed <- do.call("rbind",lapply(1:M,function(j){
+        d.imputed <- d.to.impute
+        d.imputed[, Dm.var] <- as.numeric(model.matrix.lm(imp.model.formula, data=d.imputed,na.action='na.pass') %*% beta.hat) + rnorm(nrow(d.imputed),0,sigma.hat)
+        stacked <- rbind(d.imputed, d.not.imputed)
+        stacked$j <- j
+        return(stacked[order(stacked$i,stacked$j),])
+      }))
+    } else if (imp.method == "logistic") {
+      # Logistic imputation model
+      
+      # Estimating equation for psi (imputation model)
+      S.psi.i <- function(Di, psi.hat){
+        return(Di$Dod %*% (Di$Dm - plogis(as.numeric(t(psi.hat) %*% Di$Dod))))
+      }
+      
+      # Solve for psi.hat
+      imp.fit <- glm(imp.model.formula, data = dset[which(Rule.N==1),], family="binomial")
+      psi.hat <- matrix(coef(imp.fit), ncol=1)
+      
+      # Generate imputations
+      imputed <- do.call("rbind",lapply(1:M,function(j){
+        d.imputed <- d.to.impute
+        d.imputed[, Dm.var] <- rbinom(nrow(d.imputed), 1, predict(imp.fit, d.imputed, type = "response"))
+        stacked <- rbind(d.imputed, d.not.imputed)
+        stacked$j <- j
+        return(stacked[order(stacked$i,stacked$j),])
+      }))
+    } else {
+      print("Must specify imp.method as linear or logistic")
+      stop()
+    }
+    
+    # Store the data of the imputed datasets
+    
+    Rule.NM <- matrix(imputed[,Rule.var],ncol=1)
+    H.NM <- model.matrix.lm(ipw.model.formula,data=imputed, na.action='na.pass')
+    Dm.NM <- matrix(imputed[,Dm.var], ncol=1)
+    Dod.NM <- model.matrix.lm(imp.model.formula,data=imputed, na.action='na.pass')  
+    Complete.NM <- matrix(rep(Complete.N,M),ncol=1)
+    Y.NM <- matrix(model.response(model.frame(analysis.model.formula, data=imputed,na.action=NULL)), ncol=1)
+    X.NM <- model.matrix.lm(analysis.model.formula, data=imputed, na.action='na.pass')
+    
+    get.Dij <- function(i,j){
+      ij <- (j-1)*N + i
+      list(X = matrix(X.NM[ij,], ncol=1),
+           Y = Y.NM[ij],
+           H = matrix(H.NM[ij,],ncol=1),
+           Dod = matrix(Dod.NM[ij,],ncol=1),
+           Rule = Rule.NM[ij],
+           Complete = Complete.NM[ij],
+           Dm = Dm.NM[ij])
+    }
+    
+    ### INFERENCE FOR IPW/MI
+    
+    # IPW/MI estimating equation for theta
+    S.theta.ipwmi.i <- function(Di, theta.hat, alpha.hat){
+      Wi <- Di$Rule / as.numeric(pi.i(Di, alpha.hat))
+      if (Wi == 0){
+        return(matrix(data = 0, nrow = nrow(Di$X), ncol = 1))
+      } else {
+        return(Wi*S.theta.i(Di, theta.hat))
+      }
+    }
+    
+    # Estimate theta hat, using IPW/MI
+    S.theta.multiroot <- function(theta.hat){
+      rowMeans(do.call("cbind",lapply(1:N,function(i){
+        do.call("cbind",lapply(1:M,function(j){
+          Dij <- get.Dij(i,j)
+          return(S.theta.ipwmi.i(Dij, theta.hat, alpha.hat))
+        }))
+      })))
+    }
+    
+    theta.hat <- matrix(data = multiroot(S.theta.multiroot,rep(0,nrow(get.Di(1)$X)))$root, ncol=1)
+    
+    # Perform robust inference
+    S.theta <- do.call("cbind",lapply(1:M,function(j){
+      do.call("cbind",lapply(1:N,function(i){
+        S.theta.ipwmi.i(get.Dij(i,j), theta.hat, alpha.hat)
+      }))
+    }))
+    
+    S.psi.obs.i <- function(Di, psi.hat){
+      if (Di$Complete == 0){
+        return(matrix(data = 0, nrow = length(psi.hat), ncol = 1))
+      } else {
+        return(S.psi.i(Di, psi.hat))
+      }
+    }
+    
+    S.psi.mis.i <- function(Di, psi.hat){
+      if (Di$Rule == 1 & Di$Complete == 0){ 
+        return(S.psi.i(Di, psi.hat))
+      } else {
+        return(matrix(data = 0, nrow = length(psi.hat), ncol = 1))
+      }
+    }
+    
+    S.psi.obs <- do.call("cbind",lapply(1:M,function(j){
+      do.call("cbind",lapply(1:N,function(i){
+        S.psi.obs.i(get.Dij(i,j), psi.hat)
+      }))
+    }))
+    
+    S.psi.mis <- do.call("cbind",lapply(1:M,function(j){
+      do.call("cbind",lapply(1:N,function(i){
+        S.psi.mis.i(get.Dij(i,j), psi.hat)
+      }))
+    }))
+  
+    S.alpha <- do.call("cbind",lapply(1:M,function(j){
+      do.call("cbind",lapply(1:N,function(i){
+        return(S.alpha.i(get.Dij(i,j),alpha.hat))
+      }))
+    }))
+    
+    I.alpha.hat <- 1/N * Reduce("+",lapply(1:N,function(i){
+      S.alpha <- function(alpha.hat){S.alpha.i(get.Di(i),alpha.hat)}
+      return(-jacobian(S.alpha,alpha.hat))
+    }))
+    
+    I.psi.hat <- 1/N * Reduce("+",lapply(1:N,function(i){
+      S.psi <- function(psi.hat){S.psi.obs.i(get.Di(i),psi.hat)}
+      return(-jacobian(S.psi,psi.hat))
+    }))
+    
+    kappa.hat <- -1/(N*M) * S.theta %*% t(S.psi.mis)
+    
+    delta.hat <- 1/(N*M) * Reduce("+",lapply(1:N,function(i){
+      Reduce("+", lapply(1:M,function(j){
+        S.theta.ipwmi <- function(alpha.hat){S.theta.ipwmi.i(get.Dij(i,j),theta.hat,alpha.hat)}
+        return(-jacobian(S.theta.ipwmi,alpha.hat))
+      }))
+    }))
+    
+    tau.hat <- 1/(N*M) * Reduce("+",lapply(1:N,function(i){
+      Reduce("+", lapply(1:M, function(j){
+        S.theta.ipwmi <- function(theta.hat){S.theta.ipwmi.i(get.Dij(i,j),theta.hat,alpha.hat)}
+        return(-jacobian(S.theta.ipwmi,theta.hat))
+      }))
+    }))
+    
+    I.alpha.hat.inv <- solve(I.alpha.hat)
+    I.psi.hat.inv <- solve(I.psi.hat)
+    
+    S.theta.bar.N<-do.call("cbind",lapply(1:N,function(i){
+      apply(S.theta[,i+(seq(0,(M-1)*N,N))],1,mean)
+    }))
+    
+    S.psi.obs.N<-do.call("cbind",lapply(1:N,function(i){
+      apply(S.psi.obs[,i+(seq(0,(M-1)*N,N))],1,mean)
+    }))
+    
+    S.alpha.N<-S.alpha[,1:N]
+    
+    vec<-do.call("cbind",lapply(1:N,function(i){
+      return(S.theta.bar.N[, i] - kappa.hat %*% I.psi.hat.inv %*% S.psi.obs.N[, i] - delta.hat %*% I.alpha.hat.inv %*% S.alpha.N[, i])
+    }))
+    
+    se.prop <-sqrt(diag(1/N * solve(tau.hat) %*% vec %*% (t(vec)/N) %*% t(solve(tau.hat))))
+
+    ### PERFORM INFERENCE USING RUBIN'S RULES
+    
+    # Point estimates for each of the M imputed datasets
+    theta.hats <- lapply(1:M, function(j){
+      S.theta.j.multiroot <- function(theta.hat){
+        rowMeans(do.call("cbind",lapply(1:N,function(i){
+            Dij <- get.Dij(i,j)
+            return(S.theta.ipwmi.i(Dij, theta.hat, alpha.hat))
+        })))
+      }
+      return(matrix(data = multiroot(S.theta.j.multiroot,rep(0,nrow(get.Di(1)$X)))$root, ncol=1))
+    })
+    
+    # Estimates of the variance of theta hat for each of the M imputed datasets, 
+    # using sandwich estimators incorporating estimation of the weights
+    V.hats <- lapply(1:M,function(j){
+      
+      S.theta.j <- S.theta[,1:N+(j-1)*N]
+      S.alpha.j <- S.alpha[,1:N+(j-1)*N]
+      
+      delta.hat.j <- 1/N * Reduce("+",lapply(1:N,function(i){
+        S.theta.ipwmi <- function(alpha.hat){S.theta.ipwmi.i(get.Dij(i,j),theta.hat,alpha.hat)}
+          return(-jacobian(S.theta.ipwmi,alpha.hat))
+      }))
+      
+      tau.hat.j <- 1/N * Reduce("+",lapply(1:N,function(i){
+        S.theta.ipwmi <- function(theta.hat){S.theta.ipwmi.i(get.Dij(i,j),theta.hat,alpha.hat)}
+          return(-jacobian(S.theta.ipwmi,theta.hat))
+      }))
+      
+      vec.j <- do.call("cbind",lapply(1:N,function(i){
+        return(S.theta.j[, i] - delta.hat.j %*% I.alpha.hat.inv %*% S.alpha.j[, i])
+      }))
+      
+      return(1/N * solve(tau.hat.j) %*% vec.j %*% (t(vec.j)/N) %*% t(solve(tau.hat.j)))
+    })
+    
+    # Apply Rubin's rules
+    se.rr <- sqrt(diag(Reduce("+", V.hats)/M + (1+1/M)*1/(M-1)*Reduce("+",lapply(theta.hats,function(x){
+      return((x-theta.hat)%*%t(x-theta.hat))
+    }))))
+    
+    result <- data.frame(theta.hat = theta.hat, 
+                         se.prop = se.prop,
+                         se.rr = se.rr,
+                         theta.cc.hat = theta.cc.hat,
+                         se.cc = se.cc)
+    rownames(result) <- colnames(X.NM)
+    return(result)
+}
+```
+
+```{r eval=TRUE}
+get.ipwmi.se(dset=d.obs,
+               M = 10,
+               analysis.model.formula = Y1 ~ X2*X3,
+               ipw.model.formula = R1 ~ X1,
+               imp.model.formula = Y1 ~ X1*X2*X3 + X4 + X5,
+               S.theta.i = function(Di,theta.hat){Di$X %*% (Di$Y - t(theta.hat) %*% Di$X)},
+               S.alpha.i = function(Di,alpha.hat){Di$H %*% (Di$Rule - t(alpha.hat) %*% Di$H)},
+               pi.i = function(Di,alpha.hat){t(alpha.hat) %*% Di$H},
+               imp.method = "linear")
+```
+
+### Interpretation of results
+
+1. <tt>theta.hat</tt> is the point estimate from the IPW/MI method
+2. <tt>se.prop</tt> is the estimated standard errors from the IPW/MI method using the proposed variance estimator
+3. <tt>se.rr</tt> is the estimated standard errors under Rubin's rules where in each of the M datasets, a sandwich variance estimator is used to account for estimation of the probabilities used in inverse-probability weighting
+4. <tt>theta.cc.hat</tt> is the point estimate from a complete case analysis
+5. <tt>se.cc</tt> is the estimated robust standard errors for the complete case analysis
+
+### Implementation for DURABLE study
+
+When imputing a variable, it is possible to transform it before using it in the analysis model. In the following example, we impute follow-up BMI (<tt>bfu</tt>) and then compute percent total weight change as a function of both <tt>bfu</tt> and baseline BMI <tt>bbl</tt>. We also categorize baseline BMI as predictors as follows: <tt>(bbl < 50 & bbl >= 45) + (bbl >= 50)</tt>.
+
+```{r eval=FALSE}
+
+get.ipwmi.se(dset=durable,
+             M=50,
+             analysis.model.formula = (bfu - bbl)/bbl*100 ~ rygb*renal + site + male + age_cat + raceeth + 
+               ccscore_cat + (bbl < 50 & bbl >= 45) + (bbl >= 50) + index_year_cat,
+             ipw.model.formula = R1 ~ rygb + site + age_cat + raceeth + index_year_cat,
+             imp.model.formula = bfu ~ rygb*renal + site + male + age_cat + raceeth + ccscore_cat + 
+               (bbl < 50 & bbl >= 45) + (bbl >= 50) + index_year_cat,
+             S.theta.i = function(Di,theta.hat){Di$X %*% (Di$Y - t(theta.hat) %*% Di$X)},
+             S.alpha.i = function(Di,alpha.hat){Di$H %*% (Di$Rule - as.numeric(plogis(t(alpha.hat) %*% Di$H)))},
+             pi.i = function(Di,alpha.hat){plogis(t(alpha.hat) %*% Di$H)},
+             imp.method = "linear")
+```
+
+The results of this analysis can be found in the main manuscript.
+
