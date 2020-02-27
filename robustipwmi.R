@@ -3,6 +3,8 @@
 
 # Code for implementing robust variance estimator
 
+# See https://tthaweethai.github.io/robustipwmi/robustipwmi.html for how to use this function.
+
 # Tanayott (Tony) Thaweethai
 # February 27, 2020
 
